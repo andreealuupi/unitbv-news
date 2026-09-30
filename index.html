@@ -357,11 +357,6 @@ function makeImageProxyUrl(originalUrl) {
 
     if (!normalized) return "";
 
-    /*
-       images.weserv.nl este folosit aici ca image proxy.
-       Scoatem https:// pentru formatul acceptat de proxy.
-    */
-
     const withoutProtocol = normalized.replace(/^https?:\/\//, "");
 
     return "https://images.weserv.nl/?url=" + encodeURIComponent(withoutProtocol);
@@ -514,6 +509,25 @@ function extractImageFromItem(item) {
 }
 
 /* =========================
+   CURATARE TEXT
+========================= */
+
+function cleanText(text) {
+    return (text || "")
+        .replace(/\s+/g, " ")
+        .replace(/\u00A0/g, " ")
+        .trim();
+}
+
+function normalizeForCompare(text) {
+    return cleanText(text)
+        .toLowerCase()
+        .replace(/[„”"'.:;,!?()[\]{}\-–—]/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+/* =========================
    EXTRAGERE DATA
 ========================= */
 
@@ -527,10 +541,7 @@ function extractDate(html) {
     const metas = div.querySelectorAll("meta");
     metas.forEach(meta => meta.remove());
 
-    return div.textContent
-        .replace(/\s+/g, " ")
-        .replace(/\u00A0/g, " ")
-        .trim();
+    return cleanText(div.textContent);
 }
 
 /* =========================
@@ -547,10 +558,7 @@ function htmlToCleanText(html) {
     const metas = div.querySelectorAll("meta");
     metas.forEach(meta => meta.remove());
 
-    return div.textContent
-        .replace(/\s+/g, " ")
-        .replace(/\u00A0/g, " ")
-        .trim();
+    return cleanText(div.textContent);
 }
 
 /* =========================
@@ -558,10 +566,7 @@ function htmlToCleanText(html) {
 ========================= */
 
 function limitToSentence(text) {
-    text = (text || "")
-        .replace(/\s+/g, " ")
-        .replace(/\u00A0/g, " ")
-        .trim();
+    text = cleanText(text);
 
     if (text.length <= 520) {
         return text;
@@ -583,10 +588,106 @@ function limitToSentence(text) {
 }
 
 /* =========================
+   VERIFICARE DACA TEXTUL E DOAR DATA/LOCATIE
+========================= */
+
+function looksLikeOnlyDateOrLocation(text, dateText) {
+    const cleaned = cleanText(text);
+    const normalized = normalizeForCompare(cleaned);
+    const normalizedDate = normalizeForCompare(dateText);
+
+    if (!cleaned) return true;
+
+    if (normalizedDate && normalized === normalizedDate) {
+        return true;
+    }
+
+    const months =
+        "(ianuarie|februarie|martie|aprilie|mai|iunie|iulie|august|septembrie|octombrie|noiembrie|decembrie)";
+
+    const hasDate =
+        new RegExp("\\b\\d{1,2}\\s*" + months + "\\s*\\d{4}\\b", "i").test(cleaned) ||
+        new RegExp("\\b\\d{1,2}\\s*[-–]\\s*\\d{1,2}\\s*" + months + "\\s*\\d{4}\\b", "i").test(cleaned) ||
+        /\b\d{1,2}\.\d{1,2}\.\d{4}\b/.test(cleaned);
+
+    const hasHour =
+        /\bora\b/i.test(cleaned) ||
+        /\borele\b/i.test(cleaned) ||
+        /\b\d{1,2}:\d{2}\b/.test(cleaned);
+
+    const hasLocationWords =
+        /sala|aula|rectorat|colina|bastionul|universitatea|brașov|brasov/i.test(cleaned);
+
+    if (cleaned.length < 150 && hasDate && (hasHour || hasLocationWords)) {
+        return true;
+    }
+
+    return false;
+}
+
+/* =========================
+   PREGATIRE CANDIDAT DESCRIERE
+========================= */
+
+function prepareDescriptionCandidate(text, title, dateText) {
+    let cleaned = cleanText(text);
+
+    if (!cleaned) return "";
+
+    const normalizedTitle = normalizeForCompare(title);
+    const normalizedText = normalizeForCompare(cleaned);
+
+    if (normalizedTitle && normalizedText === normalizedTitle) {
+        return "";
+    }
+
+    if (looksLikeOnlyDateOrLocation(cleaned, dateText)) {
+        return "";
+    }
+
+    const normalizedDate = normalizeForCompare(dateText);
+
+    if (normalizedDate && normalizedText.startsWith(normalizedDate)) {
+        cleaned = cleaned.substring(dateText.length);
+        cleaned = cleanText(cleaned.replace(/^[-–—,:;]+/, ""));
+    }
+
+    if (cleaned.length < 60) {
+        return "";
+    }
+
+    return limitToSentence(cleaned);
+}
+
+/* =========================
+   ALEGE CEA MAI BUNA DESCRIERE
+========================= */
+
+function chooseBestDescription(candidates, title, dateText) {
+    const seen = new Set();
+
+    for (const raw of candidates) {
+        const candidate = prepareDescriptionCandidate(raw, title, dateText);
+
+        if (!candidate) continue;
+
+        const key = normalizeForCompare(candidate);
+
+        if (seen.has(key)) continue;
+
+        seen.add(key);
+
+        return candidate;
+    }
+
+    return "";
+}
+
+/* =========================
    TEXT DIN ARTICOL
 ========================= */
 
-async function getArticleText(link) {
+async function getArticleText(link, title, dateText) {
     if (!link) return "";
 
     try {
@@ -599,20 +700,77 @@ async function getArticleText(link) {
         const parser = new DOMParser();
         const doc = parser.parseFromString(html, "text/html");
 
-        const paragraphs = [...doc.querySelectorAll("p")];
+        const removeSelectors = [
+            "script",
+            "style",
+            "noscript",
+            "header",
+            "footer",
+            "nav",
+            "img",
+            "svg",
+            "form",
+            "button"
+        ];
 
-        for (const p of paragraphs) {
-            const t = p.textContent
-                .replace(/\s+/g, " ")
-                .replace(/\u00A0/g, " ")
-                .trim();
+        removeSelectors.forEach(selector => {
+            doc.querySelectorAll(selector).forEach(el => el.remove());
+        });
 
-            if (t.length > 120) {
-                return limitToSentence(t);
+        const candidates = [];
+
+        const metaSelectors = [
+            'meta[name="description"]',
+            'meta[property="og:description"]',
+            'meta[name="twitter:description"]'
+        ];
+
+        metaSelectors.forEach(selector => {
+            const meta = doc.querySelector(selector);
+
+            if (meta && meta.getAttribute("content")) {
+                candidates.push(meta.getAttribute("content"));
             }
-        }
+        });
 
-        return "";
+        const paragraphSelectors = [
+            "article p",
+            "main p",
+            ".item-page p",
+            ".com-content-article__body p",
+            ".page-content p",
+            ".content p",
+            "#content p",
+            "p"
+        ];
+
+        paragraphSelectors.forEach(selector => {
+            doc.querySelectorAll(selector).forEach(p => {
+                candidates.push(p.textContent);
+            });
+        });
+
+        const divSelectors = [
+            "article div",
+            "main div",
+            ".item-page div",
+            ".com-content-article__body div",
+            ".page-content div",
+            ".content div",
+            "#content div"
+        ];
+
+        divSelectors.forEach(selector => {
+            doc.querySelectorAll(selector).forEach(div => {
+                const text = cleanText(div.textContent);
+
+                if (text.length > 80 && text.length < 1200) {
+                    candidates.push(text);
+                }
+            });
+        });
+
+        return chooseBestDescription(candidates, title, dateText);
 
     } catch (error) {
         console.error("ARTICLE ERROR:", error);
@@ -691,15 +849,37 @@ async function showSlide(index) {
 
     const dateText = extractDate(descriptionHtml);
 
-    const articleText = await getArticleText(item.link);
-
     const fallbackText = htmlToCleanText(descriptionHtml);
+
+    const articleText = await getArticleText(
+        item.link,
+        item.title,
+        dateText
+    );
+
+    const fallbackDescription = prepareDescriptionCandidate(
+        fallbackText,
+        item.title,
+        dateText
+    );
+
+    const descriptionText =
+        articleText || fallbackDescription || "";
 
     document.getElementById("title").innerText =
         item.title || "";
 
-    document.getElementById("date").innerText =
-        articleText || limitToSentence(fallbackText);
+    const descriptionElement =
+        document.getElementById("date");
+
+    descriptionElement.innerText =
+        descriptionText;
+
+    if (descriptionText) {
+        descriptionElement.style.display = "-webkit-box";
+    } else {
+        descriptionElement.style.display = "none";
+    }
 
     document.getElementById("eventDate").innerText =
         dateText || "";
@@ -709,6 +889,7 @@ async function showSlide(index) {
     console.log("Slide:", index);
     console.log("Titlu:", item.title);
     console.log("Imagine extrasă:", image);
+    console.log("Descriere extrasă:", descriptionText);
     console.log("Data extrasă:", dateText);
 
     const infoBox = document.getElementById("infoBox");
