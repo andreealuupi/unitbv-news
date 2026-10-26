@@ -35,7 +35,7 @@ jobs:
       - name: Instalare dependinte
         run: python -m pip install requests beautifulsoup4
 
-      - name: Citire stiri, date, descrieri si fotografii UNITBV
+      - name: Citire stiri, date, ore, locatii si fotografii UNITBV
         shell: bash
         run: |
           python - <<'PY'
@@ -54,36 +54,23 @@ jobs:
 
           BASE = 'https://www.unitbv.ro/'
           LIST = urljoin(BASE, 'stiri-si-evenimente.html')
-
           FEEDS = [
-              urljoin(
-                  BASE,
-                  'stiri-si-evenimente.feed?limit=30&type=rss'
-              ),
+              urljoin(BASE, 'stiri-si-evenimente.feed?limit=30&type=rss'),
               'https://unitbv.ro/stiri-si-evenimente.feed?limit=30&type=rss',
           ]
 
           SITE = Path('site')
           IMAGES = SITE / 'assets' / 'news'
-
           IMAGES.mkdir(parents=True, exist_ok=True)
-
-          (SITE / 'index.html').write_bytes(
-              Path('index.html').read_bytes()
-          )
+          (SITE / 'index.html').write_bytes(Path('index.html').read_bytes())
 
           session = requests.Session()
-
           session.headers.update({
               'User-Agent': (
                   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                   'AppleWebKit/537.36 Chrome/125.0 Safari/537.36'
               ),
-              'Accept': (
-                  'text/html,application/xhtml+xml,'
-                  'application/rss+xml,application/xml,'
-                  'image/webp,image/*,*/*'
-              ),
+              'Accept': 'text/html,application/rss+xml,application/xml,image/*,*/*',
           })
 
           def get(url, timeout=16):
@@ -92,715 +79,250 @@ jobs:
               return response
 
           def clean(value):
-              return re.sub(
-                  r'\s+', ' ', value or ''
-              ).strip()
+              return re.sub(r'\s+', ' ', value or '').strip()
 
           def norm(value):
-              value = unicodedata.normalize(
-                  'NFKD',
-                  clean(value).lower()
-              )
-
-              return ''.join(
-                  c for c in value
-                  if not unicodedata.combining(c)
-              )
+              value = unicodedata.normalize('NFKD', clean(value).lower())
+              return ''.join(c for c in value if not unicodedata.combining(c))
 
           def article_id(url):
-              match = re.search(
-                  r'/(\d{4,6})-[^/]+\.html',
-                  urlsplit(url).path
-              )
-
-              return (
-                  match.group(1)
-                  if match
-                  else urlsplit(url).path.rstrip('/')
-              )
+              match = re.search(r'/(\d{4,6})-[^/]+\.html', urlsplit(url).path)
+              return match.group(1) if match else urlsplit(url).path.rstrip('/')
 
           def valid_article(url):
-              return bool(
-                  re.search(
-                      r'/\d{4,6}-[^/]+\.html$',
-                      urlsplit(url).path
-                  )
-              )
+              return bool(re.search(r'/\d{4,6}-[^/]+\.html$', urlsplit(url).path))
 
           MONTH = re.compile(
-              r'\b('
-              r'ianuarie|februarie|martie|aprilie|mai|'
-              r'iunie|iulie|august|septembrie|'
-              r'octombrie|noiembrie|decembrie'
-              r')\b',
-              re.I
+              r'\b(ianuarie|februarie|martie|aprilie|mai|iunie|iulie|'
+              r'august|septembrie|octombrie|noiembrie|decembrie)\b', re.I
           )
 
           def is_event_date(text):
               value = norm(text)
-
               return (
                   8 <= len(value) <= 280
                   and (
-                      (
-                          bool(MONTH.search(value))
-                          and bool(re.search(r'\d', value))
-                      )
-                      or bool(
-                          re.search(
-                              r'(termen limita|depunerea dosarelor|'
-                              r'perioada de inscriere|inscrieri pana|'
-                              r'data evenimentului)',
-                              value
-                          )
-                      )
+                      (bool(MONTH.search(value)) and bool(re.search(r'\d', value)))
+                      or bool(re.search(
+                          r'(termen limita|depunerea dosarelor|perioada de inscriere|'
+                          r'inscrieri pana|data evenimentului)', value
+                      ))
                   )
               )
 
           def element_src(img, page):
               if not img:
                   return ''
-
               source = (
-                  img.get('src')
-                  or img.get('data-src')
-                  or img.get('data-original')
-                  or img.get('data-lazy-src')
-                  or ''
+                  img.get('src') or img.get('data-src') or
+                  img.get('data-original') or img.get('data-lazy-src') or ''
               ).strip()
-
               if not source or source.startswith('data:'):
                   return ''
-
               url = urljoin(page, source)
+              return url if urlsplit(url).scheme in ('http', 'https') else ''
 
-              return (
-                  url
-                  if urlsplit(url).scheme in ('http', 'https')
-                  else ''
-              )
-
-          # ======================================
-          # 1. RSS OFICIAL UNITBV
-          #
-          # RSS-ul contine imaginea si data
-          # asociate fiecarui articol.
-          # ======================================
-
+          # RSS: folosim imaginea si data din acelasi articol.
           def rss_items():
               for endpoint in FEEDS:
                   try:
-                      root = ET.fromstring(
-                          get(endpoint).content
-                      )
-
+                      root = ET.fromstring(get(endpoint).content)
                       result = {}
-
                       for entry in root.findall('./channel/item'):
-
                           def val(key):
                               node = entry.find(key)
-
-                              return clean(
-                                  node.text
-                                  if node is not None
-                                  else ''
-                              )
-
+                              return clean(node.text if node is not None else '')
                           title = val('title')
                           link = val('link')
                           markup = val('description')
-
                           if not title or not valid_article(link):
                               continue
-
-                          soup = BeautifulSoup(
-                              markup,
-                              'html.parser'
-                          )
-
-                          image = element_src(
-                              soup.find('img'),
-                              link
-                          )
-
-                          for bad in soup.select(
-                              'img,meta,script,style'
-                          ):
+                          soup = BeautifulSoup(markup, 'html.parser')
+                          image = element_src(soup.find('img'), link)
+                          for bad in soup.select('img,meta,script,style'):
                               bad.decompose()
-
-                          date = clean(
-                              soup.get_text(' ', strip=True)
-                          )
-
+                          date = clean(soup.get_text(' ', strip=True))
                           result[article_id(link)] = {
                               'title': title,
                               'link': link,
                               'date': date,
+                              'summary': '',
                               'imageRemote': image,
-                              'summary': ''
                           }
-
                       if result:
-                          print(
-                              'RSS oficial:',
-                              len(result),
-                              'articole'
-                          )
-
+                          print('RSS oficial:', len(result), 'articole')
                           return result
-
                   except Exception as exc:
-                      print(
-                          'RSS indisponibil:',
-                          endpoint,
-                          str(exc)[:130]
-                      )
-
+                      print('RSS indisponibil:', endpoint, str(exc)[:130])
               return {}
 
-          # ======================================
-          # 2. PAGINA STIRI SI EVENIMENTE
-          #
-          # Titlul si data sunt extrase
-          # din fiecare card individual.
-          # ======================================
-
+          # Lista de pe pagina Stiri si evenimente stabileste ordinea.
           def listing_items():
-              soup = BeautifulSoup(
-                  get(LIST).content,
-                  'html.parser'
-              )
-
+              soup = BeautifulSoup(get(LIST).content, 'html.parser')
               root = (
-                  soup.select_one('.blog')
-                  or soup.select_one('main')
-                  or soup.select_one('#content')
-                  or soup
+                  soup.select_one('.blog') or soup.select_one('main')
+                  or soup.select_one('#content') or soup
               )
-
               result = []
               seen = set()
-
-              for heading in root.select(
-                  'h2,h3,h4,h5'
-              ):
-
-                  a = heading.find(
-                      'a',
-                      href=True
-                  )
-
+              for heading in root.select('h2,h3,h4,h5'):
+                  a = heading.find('a', href=True)
                   if not a:
                       continue
-
-                  url = urljoin(
-                      LIST,
-                      a['href']
-                  )
-
+                  url = urljoin(LIST, a['href'])
                   if not valid_article(url):
                       continue
-
                   key = article_id(url)
-
                   if key in seen:
                       continue
-
-                  title = clean(
-                      a.get_text(' ', strip=True)
-                  )
-
+                  title = clean(a.get_text(' ', strip=True))
                   if len(title) < 10:
                       continue
-
                   seen.add(key)
-
                   date = ''
-
-                  # Cautam data de dupa titlul
-                  # acestui articol, nu in restul
-                  # paginii.
-
                   for node in heading.next_elements:
-
                       if (
-                          isinstance(node, Tag)
-                          and node is not heading
-                          and node.name in (
-                              'h2', 'h3', 'h4', 'h5'
-                          )
+                          isinstance(node, Tag) and node is not heading
+                          and node.name in ('h2','h3','h4','h5')
                       ):
                           break
-
-                      if (
-                          not isinstance(node, Tag)
-                          or node.name not in (
-                              'p', 'time', 'div', 'span'
-                          )
-                      ):
+                      if not isinstance(node, Tag) or node.name not in ('p','time','div','span'):
                           continue
-
-                      text = clean(
-                          node.get_text(
-                              ' ',
-                              strip=True
-                          )
-                      )
-
-                      if is_event_date(text):
-                          date = text
+                      candidate = clean(node.get_text(' ', strip=True))
+                      if is_event_date(candidate):
+                          date = candidate
                           break
-
                   result.append({
                       'title': title,
                       'link': url,
                       'date': date,
                       'summary': '',
-                      'imageRemote': ''
+                      'imageRemote': '',
                   })
-
                   if len(result) >= 20:
                       break
-
-              print(
-                  'Pagina de stiri:',
-                  len(result),
-                  'articole'
-              )
-
+              print('Pagina de stiri:', len(result), 'articole')
               return result
 
-          # ======================================
-          # 3. CONTINUTUL ARTICOLULUI
-          #
-          # Nu folosim imaginea din main
-          # deoarece poate proveni din
-          # bara laterala a altui articol.
-          # ======================================
-
-          def get_article_body(soup):
-              selectors = (
-                  '[itemprop="articleBody"]',
-                  '.com-content-article__body',
-                  '.item-page',
-                  '.article-content',
-                  '.entry-content',
-                  '.com-content-article'
-              )
-
-              for selector in selectors:
-                  found = soup.select_one(selector)
-
-                  if found:
-                      return found
-
-              return None
-
+          # Daca RSS nu are campurile, verificam doar articolul respectiv.
           def article_details(item):
               result = dict(item)
-
+              if result['date'] and result['imageRemote']:
+                  return result
               try:
-                  soup = BeautifulSoup(
-                      get(item['link']).content,
-                      'html.parser'
-                  )
-
-                  body = get_article_body(soup)
-
-                  if body is None:
-                      print(
-                          'Fara container specific articolului:',
-                          item['title'][:55]
-                      )
-
-                      return result
-
-                  for unwanted in body.select(
-                      'script,style,noscript,nav,'
-                      'aside,footer,form'
+                  soup = BeautifulSoup(get(item['link']).content, 'html.parser')
+                  body = None
+                  for selector in (
+                      '[itemprop="articleBody"]', '.com-content-article__body',
+                      '.item-page', '.article-content', '.entry-content',
+                      '.com-content-article',
                   ):
+                      body = soup.select_one(selector)
+                      if body:
+                          break
+                  if not body:
+                      print('Fara container articol:', item['title'][:55])
+                      return result
+                  for unwanted in body.select('script,style,noscript,nav,aside,footer,form'):
                       unwanted.decompose()
-
                   paragraphs = [
-                      clean(p.get_text(' ', strip=True))
-                      for p in body.select('p')
+                      clean(p.get_text(' ', strip=True)) for p in body.select('p')
                   ]
-
-                  paragraphs = [
-                      text for text in paragraphs
-                      if text
-                  ]
-
-                  # Daca data nu exista in RSS
-                  # sau listing, o cautam in
-                  # primele paragrafe.
-
                   if not result['date']:
                       for text in paragraphs[:7]:
-
                           if is_event_date(text):
                               result['date'] = text
                               break
-
-                  date_norm = norm(
-                      result['date']
-                  )
-
-                  title_norm = norm(
-                      result['title']
-                  )
-
-                  # Prima descriere reala
-                  # diferita de data si titlu.
-
-                  for text in paragraphs:
-
-                      if (
-                          len(text) < 65
-                          or norm(text) in (
-                              date_norm,
-                              title_norm
-                          )
-                      ):
-                          continue
-
-                      if (
-                          date_norm
-                          and norm(text).startswith(
-                              date_norm
-                          )
-                      ):
-                          text = clean(
-                              text[
-                                  len(result['date']):
-                              ].lstrip(' -–:;,.')
-                          )
-
-                      if (
-                          len(text) < 65
-                          or norm(text).startswith((
-                              'cookie',
-                              'citeste mai mult',
-                              'toate drepturile'
-                          ))
-                      ):
-                          continue
-
-                      if len(text) > 430:
-                          result['summary'] = (
-                              text[:427]
-                              .rsplit(' ', 1)[0]
-                              + '...'
-                          )
-                      else:
-                          result['summary'] = text
-
-                      break
-
-                  # Imaginea este cautata numai
-                  # in continutul acestui articol.
-
                   if not result['imageRemote']:
-
                       for img in body.select('img'):
-
-                          url = element_src(
-                              img,
-                              result['link']
-                          )
-
-                          if (
-                              url
-                              and '/images/' in
-                              urlsplit(url).path.lower()
-                          ):
+                          url = element_src(img, item['link'])
+                          if url and '/images/' in urlsplit(url).path.lower():
                               result['imageRemote'] = url
                               break
-
               except Exception as exc:
-                  print(
-                      'Articol indisponibil:',
-                      item['title'][:45],
-                      str(exc)[:110]
-                  )
-
+                  print('Articol indisponibil:', item['title'][:45], str(exc)[:110])
               return result
-
-          # ======================================
-          # 4. SALVAREA POZEI CORESPUNZATOARE
-          #
-          # Fiecare imagine este descarcata
-          # individual in GitHub Pages.
-          # ======================================
 
           def download_image(item):
               item = dict(item)
-
-              remote = item.pop(
-                  'imageRemote',
-                  ''
-              )
-
+              remote = item.pop('imageRemote', '')
               item['image'] = ''
-
               if not remote:
                   return item
-
               try:
                   response = get(remote)
-
-                  content_type = (
-                      response.headers.get(
-                          'Content-Type',
-                          ''
-                      )
-                      .split(';')[0]
-                      .lower()
-                  )
-
+                  content_type = response.headers.get('Content-Type', '').split(';')[0].lower()
                   ext = {
                       'image/jpeg': '.jpg',
                       'image/png': '.png',
                       'image/webp': '.webp',
-                      'image/gif': '.gif'
+                      'image/gif': '.gif',
                   }.get(content_type)
-
-                  if (
-                      not ext
-                      or len(response.content) > 8_000_000
-                      or len(response.content) < 100
-                  ):
+                  if not ext or not (100 <= len(response.content) <= 8_000_000):
                       return item
-
-                  filename = (
-                      hashlib.sha256(
-                          remote.encode('utf-8')
-                      ).hexdigest()[:24]
-                      + ext
-                  )
-
-                  (
-                      IMAGES / filename
-                  ).write_bytes(
-                      response.content
-                  )
-
-                  item['image'] = (
-                      'assets/news/' + filename
-                  )
-
+                  filename = hashlib.sha256(remote.encode('utf-8')).hexdigest()[:24] + ext
+                  (IMAGES / filename).write_bytes(response.content)
+                  item['image'] = 'assets/news/' + filename
               except Exception as exc:
-                  print(
-                      'Imagine indisponibila:',
-                      remote[-65:],
-                      str(exc)[:100]
-                  )
-
+                  print('Imagine indisponibila:', remote[-65:], str(exc)[:100])
               return item
 
-          # ======================================
-          # 5. COMBINARE DATE
-          #
-          # Lista de pe site stabileste
-          # ce evenimente afisam.
-          #
-          # RSS adauga data si imaginea
-          # folosind ID-ul articolului,
-          # nu pozitia sa in lista.
-          # ======================================
-
           rss = rss_items()
-
           try:
               listing = listing_items()
-
           except Exception as exc:
-              print(
-                  'Pagina de stiri indisponibila:',
-                  str(exc)[:160]
-              )
-
+              print('Pagina de stiri indisponibila:', str(exc)[:160])
               listing = []
 
           if listing:
-
               selected = []
-
               for item in listing:
-
-                  feed_item = rss.get(
-                      article_id(item['link']),
-                      {}
-                  )
-
+                  feed_item = rss.get(article_id(item['link']), {})
                   selected.append({
                       **item,
-
-                      'date': (
-                          feed_item.get('date')
-                          or item['date']
-                      ),
-
-                      'imageRemote': (
-                          feed_item.get('imageRemote')
-                          or item['imageRemote']
-                      )
+                      'date': feed_item.get('date') or item['date'],
+                      'imageRemote': feed_item.get('imageRemote') or item['imageRemote'],
                   })
-
           else:
-              selected = list(
-                  rss.values()
-              )[:20]
+              selected = list(rss.values())[:20]
 
           if not selected:
-              raise RuntimeError(
-                  'Nu s-a putut citi nicio stire UNITBV. '
-                  'Nu publicam date goale.'
-              )
+              raise RuntimeError('Nu exista stiri UNITBV disponibile. Oprim publicarea.')
 
-          # ======================================
-          # 6. PROCESARE ARTICOLE
-          # ======================================
+          with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+              enriched = list(pool.map(article_details, selected))
+              finished = list(pool.map(download_image, enriched))
 
-          with concurrent.futures.ThreadPoolExecutor(
-              max_workers=5
-          ) as pool:
-
-              enriched = list(
-                  pool.map(
-                      article_details,
-                      selected
-                  )
-              )
-
-              finished = list(
-                  pool.map(
-                      download_image,
-                      enriched
-                  )
-              )
-
-          # Nu atribuim aceeasi imagine
-          # unor articole diferite.
-
+          # Nu asociem aceeasi fotografie la articole diferite.
           seen_images = {}
-
           for item in finished:
-
               pic = item['image']
-
-              if (
-                  pic
-                  and pic in seen_images
-                  and seen_images[pic] != item['link']
-              ):
-                  print(
-                      'ATENTIE: imagine repetata:',
-                      item['title']
-                  )
-
+              if pic and pic in seen_images and seen_images[pic] != item['link']:
+                  print('ATENTIE: fotografie repetata:', item['title'])
                   item['image'] = ''
-
               elif pic:
                   seen_images[pic] = item['link']
 
-          # ======================================
-          # 7. VERIFICARE REZULTATE
-          #
-          # In jurnalul GitHub Actions
-          # putem vedea fiecare camp.
-          # ======================================
-
+          # Datele sunt obligatorii pentru majoritatea articolelor.
+          # Descrierile NU mai sunt obligatorii.
+          dated = sum(bool(item['date']) for item in finished)
+          print('TOTAL:', len(finished), 'CU DATA:', dated)
           for item in finished[:12]:
+              print('---', item['title'])
+              print('DATA/ORA/LOCATIE/TERMEN:', item['date'] or '[LIPSA]')
+              print('IMAGINE:', item['image'] or '[LIPSA]')
 
-              print(
-                  '---',
-                  item['title']
-              )
-
-              print(
-                  'DATA:',
-                  item['date'] or '[LIPSA]'
-              )
-
-              print(
-                  'DESCRIERE:',
-                  (
-                      item['summary']
-                      or '[LIPSA]'
-                  )[:110]
-              )
-
-              print(
-                  'IMAGINE:',
-                  item['image'] or '[LIPSA]'
-              )
-
-          dated = sum(
-              bool(item['date'])
-              for item in finished
-          )
-
-          described = sum(
-              bool(item['summary'])
-              for item in finished
-          )
-
-          print(
-              'TOTAL:',
-              len(finished),
-              'CU DATA:',
-              dated,
-              'CU DESCRIERE:',
-              described
-          )
-
-          # Nu inlocuim publicarea existenta
-          # cu una in care majoritatea
-          # datelor lipsesc.
-
-          if (
-              len(finished) >= 5
-              and (
-                  dated < len(finished) // 2
-                  or described < len(finished) // 2
-              )
-          ):
-              raise RuntimeError(
-                  'Prea multe date sau descrieri lipsa. '
-                  'Publicarea a fost oprita.'
-              )
-
-          # ======================================
-          # 8. GENERARE NEWS.JSON
-          # ======================================
+          if len(finished) >= 5 and dated < len(finished) // 2:
+              raise RuntimeError('Prea multe articole fara data. Publicarea a fost oprita.')
 
           output = {
-              'updatedAt': (
-                  datetime.now(
-                      timezone.utc
-                  ).isoformat()
-              ),
-              'items': finished
+              'updatedAt': datetime.now(timezone.utc).isoformat(),
+              'items': finished,
           }
-
-          (
-              SITE / 'news.json'
-          ).write_text(
-              json.dumps(
-                  output,
-                  ensure_ascii=False,
-                  indent=2
-              ),
-              encoding='utf-8'
+          (SITE / 'news.json').write_text(
+              json.dumps(output, ensure_ascii=False, indent=2), encoding='utf-8'
           )
-
-          print(
-              'news.json final:',
-              len(finished),
-              'articole'
-          )
+          print('Generat news.json:', len(finished), 'articole')
           PY
 
       - uses: actions/configure-pages@v5
