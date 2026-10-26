@@ -32,108 +32,243 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Instalare biblioteci
+      - name: Instalare dependinte
         run: python -m pip install requests beautifulsoup4
 
-      - name: Preluare automata din pagina si RSS UNITBV
+      - name: Citire stiri, date, descrieri si fotografii UNITBV
         shell: bash
         run: |
           python - <<'PY'
+          import concurrent.futures
+          import hashlib
           import json
           import re
-          import hashlib
-          import concurrent.futures
-
-          from pathlib import Path
+          import unicodedata
+          import xml.etree.ElementTree as ET
           from datetime import datetime, timezone
-          from urllib.parse import urljoin
-          from xml.etree import ElementTree as ET
+          from pathlib import Path
+          from urllib.parse import urljoin, urlsplit
 
           import requests
-          from bs4 import BeautifulSoup
+          from bs4 import BeautifulSoup, Tag
 
-          BASE = 'https://unitbv.ro/'
-          PAGE = BASE + 'stiri-si-evenimente.html'
+          BASE = 'https://www.unitbv.ro/'
+          LIST = urljoin(BASE, 'stiri-si-evenimente.html')
 
           FEEDS = [
-              BASE + 'stiri-si-evenimente.feed?limit=30&type=rss',
-              'https://www.unitbv.ro/stiri-si-evenimente.feed?limit=30&type=rss',
+              urljoin(
+                  BASE,
+                  'stiri-si-evenimente.feed?limit=30&type=rss'
+              ),
+              'https://unitbv.ro/stiri-si-evenimente.feed?limit=30&type=rss',
           ]
 
-          HEADERS = {
-              'User-Agent': 'Mozilla/5.0 (compatible; UNITBVNewsDisplay/1.0)',
-              'Accept': 'text/html,application/rss+xml,application/xml,*/*'
-          }
+          SITE = Path('site')
+          IMAGES = SITE / 'assets' / 'news'
 
-          ASSETS = Path('assets/news')
-          ASSETS.mkdir(parents=True, exist_ok=True)
+          IMAGES.mkdir(parents=True, exist_ok=True)
 
-          def get(url, timeout=15):
-              response = requests.get(
-                  url,
-                  headers=HEADERS,
-                  timeout=timeout
-              )
+          (SITE / 'index.html').write_bytes(
+              Path('index.html').read_bytes()
+          )
+
+          session = requests.Session()
+
+          session.headers.update({
+              'User-Agent': (
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                  'AppleWebKit/537.36 Chrome/125.0 Safari/537.36'
+              ),
+              'Accept': (
+                  'text/html,application/xhtml+xml,'
+                  'application/rss+xml,application/xml,'
+                  'image/webp,image/*,*/*'
+              ),
+          })
+
+          def get(url, timeout=16):
+              response = session.get(url, timeout=timeout)
               response.raise_for_status()
               return response
 
-          def text_clean(s):
-              return re.sub(r'\s+', ' ', s or '').strip()
+          def clean(value):
+              return re.sub(
+                  r'\s+', ' ', value or ''
+              ).strip()
 
-          def get_xml_child(node, name):
-              for child in node:
-                  if child.tag.rsplit('}', 1)[-1] == name:
-                      return (child.text or '').strip()
-              return ''
+          def norm(value):
+              value = unicodedata.normalize(
+                  'NFKD',
+                  clean(value).lower()
+              )
 
-          # RSS oficial
-          def feed_items():
-              for url in FEEDS:
+              return ''.join(
+                  c for c in value
+                  if not unicodedata.combining(c)
+              )
+
+          def article_id(url):
+              match = re.search(
+                  r'/(\d{4,6})-[^/]+\.html',
+                  urlsplit(url).path
+              )
+
+              return (
+                  match.group(1)
+                  if match
+                  else urlsplit(url).path.rstrip('/')
+              )
+
+          def valid_article(url):
+              return bool(
+                  re.search(
+                      r'/\d{4,6}-[^/]+\.html$',
+                      urlsplit(url).path
+                  )
+              )
+
+          MONTH = re.compile(
+              r'\b('
+              r'ianuarie|februarie|martie|aprilie|mai|'
+              r'iunie|iulie|august|septembrie|'
+              r'octombrie|noiembrie|decembrie'
+              r')\b',
+              re.I
+          )
+
+          def is_event_date(text):
+              value = norm(text)
+
+              return (
+                  8 <= len(value) <= 280
+                  and (
+                      (
+                          bool(MONTH.search(value))
+                          and bool(re.search(r'\d', value))
+                      )
+                      or bool(
+                          re.search(
+                              r'(termen limita|depunerea dosarelor|'
+                              r'perioada de inscriere|inscrieri pana|'
+                              r'data evenimentului)',
+                              value
+                          )
+                      )
+                  )
+              )
+
+          def element_src(img, page):
+              if not img:
+                  return ''
+
+              source = (
+                  img.get('src')
+                  or img.get('data-src')
+                  or img.get('data-original')
+                  or img.get('data-lazy-src')
+                  or ''
+              ).strip()
+
+              if not source or source.startswith('data:'):
+                  return ''
+
+              url = urljoin(page, source)
+
+              return (
+                  url
+                  if urlsplit(url).scheme in ('http', 'https')
+                  else ''
+              )
+
+          # ======================================
+          # 1. RSS OFICIAL UNITBV
+          #
+          # RSS-ul contine imaginea si data
+          # asociate fiecarui articol.
+          # ======================================
+
+          def rss_items():
+              for endpoint in FEEDS:
                   try:
-                      root = ET.fromstring(get(url).content)
-                      found = []
+                      root = ET.fromstring(
+                          get(endpoint).content
+                      )
 
-                      for item in root.iter('item'):
-                          title = get_xml_child(item, 'title')
-                          link = get_xml_child(item, 'link')
-                          desc = get_xml_child(item, 'description')
+                      result = {}
 
-                          if not title or not link:
+                      for entry in root.findall('./channel/item'):
+
+                          def val(key):
+                              node = entry.find(key)
+
+                              return clean(
+                                  node.text
+                                  if node is not None
+                                  else ''
+                              )
+
+                          title = val('title')
+                          link = val('link')
+                          markup = val('description')
+
+                          if not title or not valid_article(link):
                               continue
 
-                          soup = BeautifulSoup(desc, 'html.parser')
-                          image = soup.find('img')
-
-                          image_url = (
-                              urljoin(BASE, image.get('src', ''))
-                              if image else ''
+                          soup = BeautifulSoup(
+                              markup,
+                              'html.parser'
                           )
 
-                          date = text_clean(
+                          image = element_src(
+                              soup.find('img'),
+                              link
+                          )
+
+                          for bad in soup.select(
+                              'img,meta,script,style'
+                          ):
+                              bad.decompose()
+
+                          date = clean(
                               soup.get_text(' ', strip=True)
                           )
 
-                          found.append(dict(
-                              title=title,
-                              link=link,
-                              date=date,
-                              summary='',
-                              imageRemote=image_url
-                          ))
+                          result[article_id(link)] = {
+                              'title': title,
+                              'link': link,
+                              'date': date,
+                              'imageRemote': image,
+                              'summary': ''
+                          }
 
-                      if found:
-                          print('RSS UNITBV:', len(found), 'articole')
-                          return found
+                      if result:
+                          print(
+                              'RSS oficial:',
+                              len(result),
+                              'articole'
+                          )
 
-                  except Exception as e:
-                      print('RSS nereusit:', str(e)[:180])
+                          return result
 
-              return []
+                  except Exception as exc:
+                      print(
+                          'RSS indisponibil:',
+                          endpoint,
+                          str(exc)[:130]
+                      )
 
-          # Prima pagina de stiri UNITBV
+              return {}
+
+          # ======================================
+          # 2. PAGINA STIRI SI EVENIMENTE
+          #
+          # Titlul si data sunt extrase
+          # din fiecare card individual.
+          # ======================================
+
           def listing_items():
               soup = BeautifulSoup(
-                  get(PAGE).text,
+                  get(LIST).content,
                   'html.parser'
               )
 
@@ -144,225 +279,517 @@ jobs:
                   or soup
               )
 
-              found = []
+              result = []
               seen = set()
 
-              for heading in root.select('h2, h3, h4, h5'):
-                  a = heading.find('a', href=True)
+              for heading in root.select(
+                  'h2,h3,h4,h5'
+              ):
+
+                  a = heading.find(
+                      'a',
+                      href=True
+                  )
 
                   if not a:
                       continue
 
-                  link = urljoin(BASE, a['href'])
+                  url = urljoin(
+                      LIST,
+                      a['href']
+                  )
 
-                  if not re.search(
-                      r'/\d{4}-[^/]+\.html(?:\?.*)?$',
-                      link
-                  ):
+                  if not valid_article(url):
                       continue
 
-                  title = text_clean(
+                  key = article_id(url)
+
+                  if key in seen:
+                      continue
+
+                  title = clean(
                       a.get_text(' ', strip=True)
                   )
 
-                  if len(title) < 12 or link in seen:
+                  if len(title) < 10:
                       continue
 
-                  seen.add(link)
+                  seen.add(key)
+
                   date = ''
 
-                  for sibling in heading.find_next_siblings(limit=3):
-                      candidate = text_clean(
-                          sibling.get_text(' ', strip=True)
-                      )
+                  # Cautam data de dupa titlul
+                  # acestui articol, nu in restul
+                  # paginii.
+
+                  for node in heading.next_elements:
 
                       if (
-                          5 < len(candidate) < 240
-                          and 'Citește mai mult' not in candidate
+                          isinstance(node, Tag)
+                          and node is not heading
+                          and node.name in (
+                              'h2', 'h3', 'h4', 'h5'
+                          )
                       ):
-                          date = candidate
                           break
 
-                  found.append(dict(
-                      title=title,
-                      link=link,
-                      date=date,
-                      summary='',
-                      imageRemote=''
-                  ))
+                      if (
+                          not isinstance(node, Tag)
+                          or node.name not in (
+                              'p', 'time', 'div', 'span'
+                          )
+                      ):
+                          continue
 
-                  if len(found) >= 20:
+                      text = clean(
+                          node.get_text(
+                              ' ',
+                              strip=True
+                          )
+                      )
+
+                      if is_event_date(text):
+                          date = text
+                          break
+
+                  result.append({
+                      'title': title,
+                      'link': url,
+                      'date': date,
+                      'summary': '',
+                      'imageRemote': ''
+                  })
+
+                  if len(result) >= 20:
                       break
 
-              print('Pagina UNITBV:', len(found), 'articole')
-              return found
+              print(
+                  'Pagina de stiri:',
+                  len(result),
+                  'articole'
+              )
 
-          # Descriere si imagine din articolul complet
-          def enrich(item):
-              result = item.copy()
+              return result
+
+          # ======================================
+          # 3. CONTINUTUL ARTICOLULUI
+          #
+          # Nu folosim imaginea din main
+          # deoarece poate proveni din
+          # bara laterala a altui articol.
+          # ======================================
+
+          def get_article_body(soup):
+              selectors = (
+                  '[itemprop="articleBody"]',
+                  '.com-content-article__body',
+                  '.item-page',
+                  '.article-content',
+                  '.entry-content',
+                  '.com-content-article'
+              )
+
+              for selector in selectors:
+                  found = soup.select_one(selector)
+
+                  if found:
+                      return found
+
+              return None
+
+          def article_details(item):
+              result = dict(item)
 
               try:
                   soup = BeautifulSoup(
-                      get(result['link'], 12).text,
+                      get(item['link']).content,
                       'html.parser'
                   )
 
-                  main = (
-                      soup.select_one('.com-content-article__body')
-                      or soup.select_one('.item-page')
-                      or soup.select_one('article')
-                      or soup.select_one('main')
-                      or soup
-                  )
+                  body = get_article_body(soup)
 
-                  for unwanted in main.select(
-                      'script,style,nav,header,footer,aside,form'
+                  if body is None:
+                      print(
+                          'Fara container specific articolului:',
+                          item['title'][:55]
+                      )
+
+                      return result
+
+                  for unwanted in body.select(
+                      'script,style,noscript,nav,'
+                      'aside,footer,form'
                   ):
                       unwanted.decompose()
 
-                  for p in main.select('p'):
-                      candidate = text_clean(
-                          p.get_text(' ', strip=True)
-                      )
+                  paragraphs = [
+                      clean(p.get_text(' ', strip=True))
+                      for p in body.select('p')
+                  ]
 
-                      if (
-                          65 <= len(candidate) <= 2500
-                          and candidate.lower() != result['date'].lower()
-                          and not candidate.lower().startswith(
-                              ('cookie', 'acest site', 'căutare')
-                          )
-                      ):
-                          if len(candidate) <= 430:
-                              result['summary'] = candidate
-                          else:
-                              result['summary'] = (
-                                  candidate[:430].rsplit(' ', 1)[0] + '...'
-                              )
-                          break
+                  paragraphs = [
+                      text for text in paragraphs
+                      if text
+                  ]
+
+                  # Daca data nu exista in RSS
+                  # sau listing, o cautam in
+                  # primele paragrafe.
 
                   if not result['date']:
-                      for p in main.select('p')[:3]:
-                          candidate = text_clean(
-                              p.get_text(' ', strip=True)
+                      for text in paragraphs[:7]:
+
+                          if is_event_date(text):
+                              result['date'] = text
+                              break
+
+                  date_norm = norm(
+                      result['date']
+                  )
+
+                  title_norm = norm(
+                      result['title']
+                  )
+
+                  # Prima descriere reala
+                  # diferita de data si titlu.
+
+                  for text in paragraphs:
+
+                      if (
+                          len(text) < 65
+                          or norm(text) in (
+                              date_norm,
+                              title_norm
+                          )
+                      ):
+                          continue
+
+                      if (
+                          date_norm
+                          and norm(text).startswith(
+                              date_norm
+                          )
+                      ):
+                          text = clean(
+                              text[
+                                  len(result['date']):
+                              ].lstrip(' -–:;,.')
+                          )
+
+                      if (
+                          len(text) < 65
+                          or norm(text).startswith((
+                              'cookie',
+                              'citeste mai mult',
+                              'toate drepturile'
+                          ))
+                      ):
+                          continue
+
+                      if len(text) > 430:
+                          result['summary'] = (
+                              text[:427]
+                              .rsplit(' ', 1)[0]
+                              + '...'
+                          )
+                      else:
+                          result['summary'] = text
+
+                      break
+
+                  # Imaginea este cautata numai
+                  # in continutul acestui articol.
+
+                  if not result['imageRemote']:
+
+                      for img in body.select('img'):
+
+                          url = element_src(
+                              img,
+                              result['link']
                           )
 
                           if (
-                              5 < len(candidate) < 230
-                              and candidate != result['summary']
+                              url
+                              and '/images/' in
+                              urlsplit(url).path.lower()
                           ):
-                              result['date'] = candidate
+                              result['imageRemote'] = url
                               break
 
-                  if not result['imageRemote']:
-                      img = main.find('img', src=True)
-
-                      if img:
-                          result['imageRemote'] = urljoin(
-                              result['link'],
-                              img['src']
-                          )
-
-              except Exception as e:
+              except Exception as exc:
                   print(
-                      'Articol partial:',
-                      result['title'][:40],
-                      str(e)[:90]
+                      'Articol indisponibil:',
+                      item['title'][:45],
+                      str(exc)[:110]
                   )
 
               return result
 
-          # Descarcam imaginile in site-ul GitHub Pages
-          def save_picture(item):
-              remote = item.pop('imageRemote', '')
+          # ======================================
+          # 4. SALVAREA POZEI CORESPUNZATOARE
+          #
+          # Fiecare imagine este descarcata
+          # individual in GitHub Pages.
+          # ======================================
+
+          def download_image(item):
+              item = dict(item)
+
+              remote = item.pop(
+                  'imageRemote',
+                  ''
+              )
+
               item['image'] = ''
 
               if not remote:
                   return item
 
               try:
-                  response = get(remote, 12)
+                  response = get(remote)
 
-                  ctype = response.headers.get(
-                      'Content-Type', ''
-                  ).split(';')[0].lower()
+                  content_type = (
+                      response.headers.get(
+                          'Content-Type',
+                          ''
+                      )
+                      .split(';')[0]
+                      .lower()
+                  )
 
                   ext = {
                       'image/jpeg': '.jpg',
                       'image/png': '.png',
                       'image/webp': '.webp',
                       'image/gif': '.gif'
-                  }.get(ctype)
+                  }.get(content_type)
 
-                  if not ext or len(response.content) > 6_000_000:
+                  if (
+                      not ext
+                      or len(response.content) > 8_000_000
+                      or len(response.content) < 100
+                  ):
                       return item
 
-                  name = (
-                      hashlib.sha256(remote.encode()).hexdigest()[:20]
+                  filename = (
+                      hashlib.sha256(
+                          remote.encode('utf-8')
+                      ).hexdigest()[:24]
                       + ext
                   )
 
-                  (ASSETS / name).write_bytes(
+                  (
+                      IMAGES / filename
+                  ).write_bytes(
                       response.content
                   )
 
-                  item['image'] = 'assets/news/' + name
+                  item['image'] = (
+                      'assets/news/' + filename
+                  )
 
-              except Exception as e:
+              except Exception as exc:
                   print(
                       'Imagine indisponibila:',
-                      str(e)[:90]
+                      remote[-65:],
+                      str(exc)[:100]
                   )
 
               return item
 
-          # Prioritate: pagina de stiri solicitata
+          # ======================================
+          # 5. COMBINARE DATE
+          #
+          # Lista de pe site stabileste
+          # ce evenimente afisam.
+          #
+          # RSS adauga data si imaginea
+          # folosind ID-ul articolului,
+          # nu pozitia sa in lista.
+          # ======================================
+
+          rss = rss_items()
+
           try:
               listing = listing_items()
-          except Exception as e:
+
+          except Exception as exc:
               print(
-                  'Pagina indisponibila:',
-                  str(e)[:180]
+                  'Pagina de stiri indisponibila:',
+                  str(exc)[:160]
               )
+
               listing = []
 
-          # Daca pagina nu poate fi citita,
-          # incercam RSS-ul oficial
-          if len(listing) >= 3:
-              chosen = listing
-          else:
-              chosen = feed_items()
+          if listing:
 
-          if not chosen:
-              raise SystemExit(
-                  'Pagina si RSS-ul UNITBV nu sunt disponibile.'
+              selected = []
+
+              for item in listing:
+
+                  feed_item = rss.get(
+                      article_id(item['link']),
+                      {}
+                  )
+
+                  selected.append({
+                      **item,
+
+                      'date': (
+                          feed_item.get('date')
+                          or item['date']
+                      ),
+
+                      'imageRemote': (
+                          feed_item.get('imageRemote')
+                          or item['imageRemote']
+                      )
+                  })
+
+          else:
+              selected = list(
+                  rss.values()
+              )[:20]
+
+          if not selected:
+              raise RuntimeError(
+                  'Nu s-a putut citi nicio stire UNITBV. '
+                  'Nu publicam date goale.'
               )
 
-          # Procesare paralela a articolelor
+          # ======================================
+          # 6. PROCESARE ARTICOLE
+          # ======================================
+
           with concurrent.futures.ThreadPoolExecutor(
               max_workers=5
           ) as pool:
-              enriched = list(pool.map(enrich, chosen))
-              pictures = list(pool.map(save_picture, enriched))
 
-          # Curatare imagini vechi din versiunea generata
-          keep = {
-              Path(x['image']).name
-              for x in pictures
-              if x['image']
+              enriched = list(
+                  pool.map(
+                      article_details,
+                      selected
+                  )
+              )
+
+              finished = list(
+                  pool.map(
+                      download_image,
+                      enriched
+                  )
+              )
+
+          # Nu atribuim aceeasi imagine
+          # unor articole diferite.
+
+          seen_images = {}
+
+          for item in finished:
+
+              pic = item['image']
+
+              if (
+                  pic
+                  and pic in seen_images
+                  and seen_images[pic] != item['link']
+              ):
+                  print(
+                      'ATENTIE: imagine repetata:',
+                      item['title']
+                  )
+
+                  item['image'] = ''
+
+              elif pic:
+                  seen_images[pic] = item['link']
+
+          # ======================================
+          # 7. VERIFICARE REZULTATE
+          #
+          # In jurnalul GitHub Actions
+          # putem vedea fiecare camp.
+          # ======================================
+
+          for item in finished[:12]:
+
+              print(
+                  '---',
+                  item['title']
+              )
+
+              print(
+                  'DATA:',
+                  item['date'] or '[LIPSA]'
+              )
+
+              print(
+                  'DESCRIERE:',
+                  (
+                      item['summary']
+                      or '[LIPSA]'
+                  )[:110]
+              )
+
+              print(
+                  'IMAGINE:',
+                  item['image'] or '[LIPSA]'
+              )
+
+          dated = sum(
+              bool(item['date'])
+              for item in finished
+          )
+
+          described = sum(
+              bool(item['summary'])
+              for item in finished
+          )
+
+          print(
+              'TOTAL:',
+              len(finished),
+              'CU DATA:',
+              dated,
+              'CU DESCRIERE:',
+              described
+          )
+
+          # Nu inlocuim publicarea existenta
+          # cu una in care majoritatea
+          # datelor lipsesc.
+
+          if (
+              len(finished) >= 5
+              and (
+                  dated < len(finished) // 2
+                  or described < len(finished) // 2
+              )
+          ):
+              raise RuntimeError(
+                  'Prea multe date sau descrieri lipsa. '
+                  'Publicarea a fost oprita.'
+              )
+
+          # ======================================
+          # 8. GENERARE NEWS.JSON
+          # ======================================
+
+          output = {
+              'updatedAt': (
+                  datetime.now(
+                      timezone.utc
+                  ).isoformat()
+              ),
+              'items': finished
           }
 
-          for p in ASSETS.iterdir():
-              if p.is_file() and p.name not in keep:
-                  p.unlink()
-
-          payload = {
-              'updatedAt': datetime.now(timezone.utc).isoformat(),
-              'items': pictures
-          }
-
-          Path('news.json').write_text(
+          (
+              SITE / 'news.json'
+          ).write_text(
               json.dumps(
-                  payload,
+                  output,
                   ensure_ascii=False,
                   indent=2
               ),
@@ -370,9 +797,9 @@ jobs:
           )
 
           print(
-              'Generat news.json cu',
-              len(pictures),
-              'evenimente'
+              'news.json final:',
+              len(finished),
+              'articole'
           )
           PY
 
@@ -380,7 +807,7 @@ jobs:
 
       - uses: actions/upload-pages-artifact@v4
         with:
-          path: .
+          path: site
 
       - name: Publicare GitHub Pages
         id: deployment
