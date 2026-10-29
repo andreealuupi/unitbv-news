@@ -277,6 +277,7 @@ body {
 const DATA_URL = "https://andreealuupi.github.io/unitbv-news/news.json";
 
 const SLIDE_TIME = 20000;
+const PROMO_SLIDE_TIME = 30000;
 
 const CHECK_TIME = 5 * 60 * 1000;
 
@@ -286,6 +287,13 @@ let slideInterval = null;
 let fetching = false;
 let version = "";
 let requestId = 0;
+
+const promoItem = {
+    title: "TSG recrutează!",
+    summary: "Alătură-te echipei care dezvoltă proiectele de digitalizare ale Universității.",
+    date: "Transylvania Star Group • Code for a Better University",
+    image: "assets/tsg-recruitment.jpg"
+};
 
 
 /* =========================
@@ -513,14 +521,14 @@ function showSlide(index) {
 function startSlides() {
 
     if (slideInterval) {
-        clearInterval(slideInterval);
+        clearTimeout(slideInterval);
     }
 
     current = 0;
 
     showSlide(0);
 
-    slideInterval = setInterval(() => {
+    const showNextSlide = () => {
 
         if (!items.length) {
             return;
@@ -531,7 +539,38 @@ function startSlides() {
 
         showSlide(current);
 
-    }, SLIDE_TIME);
+        slideInterval = setTimeout(
+            showNextSlide,
+            items[current] === promoItem
+                ? PROMO_SLIDE_TIME
+                : SLIDE_TIME
+        );
+    };
+
+    slideInterval = setTimeout(
+        showNextSlide,
+        items[0] === promoItem
+            ? PROMO_SLIDE_TIME
+            : SLIDE_TIME
+    );
+}
+
+function buildSlides(newsItems) {
+
+    const slides = [];
+
+    for (let index = 0; index < newsItems.length; index += 2) {
+        slides.push(newsItems[index]);
+
+        if (newsItems[index + 1]) {
+            slides.push(
+                newsItems[index + 1],
+                promoItem
+            );
+        }
+    }
+
+    return slides.filter(Boolean);
 }
 
 
@@ -600,7 +639,7 @@ async function loadNews() {
 
         if (version !== newVersion) {
 
-            items = data.items;
+            items = buildSlides(data.items);
 
             version = newVersion;
 
@@ -649,6 +688,8 @@ async function loadNews() {
    START
 ========================= */
 
+items = [promoItem];
+startSlides();
 loadNews();
 
 /* VERIFICAM DATE NOI LA FIECARE 5 MINUTE */
