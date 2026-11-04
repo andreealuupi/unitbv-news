@@ -291,9 +291,21 @@ let requestId = 0;
 const promoItem = {
     title: "TSG recrutează!",
     summary: "Alătură-te echipei care dezvoltă proiectele de digitalizare ale Universității.",
-    date: "Transylvania Star Group • tsg.unitbv.ro",
+    date: "Transilvania Star Group • tsg.unitbv.ro",
     image: "assets/tsg-recruitment.jpg"
 };
+
+const unifestPromoItem = {
+    title: "UniFEST - Distractie gratis, nu degeaba!",
+    summary: "Cel mai mare festival studentesc din Romania, un eveniment care aduce anual impreuna studenti din toate colturile tarii.",
+    date: "In perioada 6-16 noiembrie.",
+    image: "assets/unifest-poster.jpg"
+};
+
+const promoItems = new Set([
+    promoItem,
+    unifestPromoItem
+]);
 
 
 /* =========================
@@ -541,7 +553,7 @@ function startSlides() {
 
         slideInterval = setTimeout(
             showNextSlide,
-            items[current] === promoItem
+            promoItems.has(items[current])
                 ? PROMO_SLIDE_TIME
                 : SLIDE_TIME
         );
@@ -549,7 +561,7 @@ function startSlides() {
 
     slideInterval = setTimeout(
         showNextSlide,
-        items[0] === promoItem
+        promoItems.has(items[0])
             ? PROMO_SLIDE_TIME
             : SLIDE_TIME
     );
@@ -559,14 +571,17 @@ function buildSlides(newsItems) {
 
     const slides = [];
 
-    for (let index = 0; index < newsItems.length; index += 2) {
+    for (let index = 0; index < newsItems.length; index++) {
+        const newsNumber = index + 1;
+
         slides.push(newsItems[index]);
 
-        if (newsItems[index + 1]) {
-            slides.push(
-                newsItems[index + 1],
-                promoItem
-            );
+        if (newsNumber % 2 === 0) {
+            slides.push(promoItem);
+        }
+
+        if (newsNumber % 3 === 0) {
+            slides.push(unifestPromoItem);
         }
     }
 
