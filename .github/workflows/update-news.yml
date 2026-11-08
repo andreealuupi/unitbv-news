@@ -63,9 +63,12 @@ jobs:
           IMAGES = SITE / 'assets' / 'news'
           IMAGES.mkdir(parents=True, exist_ok=True)
           (SITE / 'assets').mkdir(parents=True, exist_ok=True)
-          banner = Path('assets/tsg-recruitment.jpg')
-          if banner.exists():
-              (SITE / 'assets' / banner.name).write_bytes(banner.read_bytes())
+          for banner in (
+              Path('assets/tsg-recruitment.jpg'),
+              Path('assets/unifest-poster.jpg'),
+          ):
+              if banner.exists():
+                  (SITE / 'assets' / banner.name).write_bytes(banner.read_bytes())
           (SITE / 'index.html').write_bytes(Path('index.html').read_bytes())
 
           session = requests.Session()
